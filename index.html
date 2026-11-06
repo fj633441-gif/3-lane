@@ -1,0 +1,343 @@
+
+
+```html name=index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Lane Rider</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #080a0d;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      touch-action: none;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" aria-label="Three-lane bike dodging game"></canvas>
+<script>
+(() => {
+  "use strict";
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  let w = 0, h = 0, dpr = 1;
+
+  const game = {
+    mode: "ready",
+    lane: 1,
+    cars: [],
+    score: 0,
+    speed: 1,
+    spawnTimer: 0,
+    lastTime: 0,
+    flash: 0
+  };
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = window.innerWidth;
+    h = window.innerHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  const horizon = () => h * 0.19;
+  const roadCenter = () => w * 0.5;
+  const roadHalfAt = z => w * (0.18 + 0.39 * z);
+
+  function laneX(lane, z) {
+    return roadCenter() + (lane - 1) * roadHalfAt(z) * (2 / 3);
+  }
+
+  function roundedRect(x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
+  }
+
+  function drawRoad() {
+    const hy = horizon();
+    const nearHalf = roadHalfAt(1);
+    const farHalf = roadHalfAt(0);
+
+    // Dark surroundings and black shoulders.
+    ctx.fillStyle = "#080a0d";
+    ctx.fillRect(0, 0, w, h);
+
+    // Grey road, widening toward the player.
+    ctx.beginPath();
+    ctx.moveTo(roadCenter() - farHalf, hy);
+    ctx.lineTo(roadCenter() + farHalf, hy);
+    ctx.lineTo(roadCenter() + nearHalf, h);
+    ctx.lineTo(roadCenter() - nearHalf, h);
+    ctx.closePath();
+    ctx.fillStyle = "#55595e";
+    ctx.fill();
+
+    // Subtle shoulder edges.
+    ctx.strokeStyle = "#202328";
+    ctx.lineWidth = Math.max(3, w * 0.009);
+    ctx.beginPath();
+    ctx.moveTo(roadCenter() - farHalf, hy);
+    ctx.lineTo(roadCenter() - nearHalf, h);
+    ctx.moveTo(roadCenter() + farHalf, hy);
+    ctx.lineTo(roadCenter() + nearHalf, h);
+    ctx.stroke();
+
+    // Perspective dashed lane dividers.
+    for (const boundary of [-1 / 3, 1 / 3]) {
+      for (let i = 0; i < 16; i++) {
+        const z1 = (i / 16 + (game.score * 0.012) % (1 / 16));
+        const z2 = Math.min(1, z1 + 0.032);
+        if (z1 >= 1) continue;
+
+        const x1 = roadCenter() + boundary * roadHalfAt(z1) * 2;
+        const x2 = roadCenter() + boundary * roadHalfAt(z2) * 2;
+        const y1 = hy + (h - hy) * z1;
+        const y2 = hy + (h - hy) * z2;
+
+        ctx.strokeStyle = "rgba(255,255,255,0.88)";
+        ctx.lineWidth = 1.5 + z1 * Math.max(1, w * 0.006);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawCar(car) {
+    const z = car.z;
+    const x = laneX(car.lane, z);
+    const y = horizon() + (h - horizon()) * z;
+    const scale = 0.22 + z * 1.23;
+    const carW = Math.max(13, Math.min(w * 0.18, w * 0.105 * scale));
+    const carH = carW * (car.type === "suv" ? 1.16 : 1.0);
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.scale(scale, scale);
+
+    // Wheels and soft shadow.
+    ctx.fillStyle = "rgba(0,0,0,0.48)";
+    ctx.beginPath();
+    ctx.ellipse(0, carH * 0.42, carW * 0.67, carH * 0.18, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#17191c";
+    roundedRect(-carW * 0.53, -carH * 0.16, carW * 0.16, carH * 0.64, carW * 0.06);
+    ctx.fill();
+    roundedRect(carW * 0.37, -carH * 0.16, carW * 0.16, carH * 0.64, carW * 0.06);
+    ctx.fill();
+
+    // Rear body.
+    const bodyColor = car.type === "suv" ? "#f1f0e9" : "#c93631";
+    roundedRect(-carW / 2, -carH / 2, carW, carH, carW * 0.14);
+    ctx.fillStyle = bodyColor;
+    ctx.fill();
+
+    // Rear window.
+    roundedRect(-carW * 0.34, -carH * 0.40, carW * 0.68, carH * 0.27, carW * 0.08);
+    ctx.fillStyle = car.type === "suv" ? "#78848a" : "#3c4b55";
+    ctx.fill();
+
+    // Trunk / tailgate detail.
+    ctx.fillStyle = car.type === "suv" ? "#d5d4ce" : "#a92724";
+    ctx.fillRect(-carW * 0.39, -carH * 0.06, carW * 0.78, carH * 0.23);
+
+    // Taillights.
+    ctx.fillStyle = "#ff3b32";
+    roundedRect(-carW * 0.44, -carH * 0.08, carW * 0.13, carH * 0.24, carW * 0.035);
+    ctx.fill();
+    roundedRect(carW * 0.31, -carH * 0.08, carW * 0.13, carH * 0.24, carW * 0.035);
+    ctx.fill();
+
+    // License plate and bumper.
+    roundedRect(-carW * 0.17, carH * 0.15, carW * 0.34, carH * 0.13, carW * 0.025);
+    ctx.fillStyle = "#e7e5d7";
+    ctx.fill();
+    ctx.fillStyle = car.type === "suv" ? "#a4a5a1" : "#8d2523";
+    roundedRect(-carW * 0.44, carH * 0.36, carW * 0.88, carH * 0.12, carW * 0.035);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawBike() {
+    const x = laneX(game.lane, 0.94);
+    const baseY = h * 0.87;
+    const s = Math.min(1, w / 390, h / 650);
+
+    ctx.save();
+    ctx.translate(x, baseY);
+    ctx.scale(s, s);
+
+    // Ground shadow.
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.beginPath();
+    ctx.ellipse(0, 45, 37, 10, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Rear tire.
+    ctx.fillStyle = "#111316";
+    roundedRect(-12, 4, 24, 53, 10);
+    ctx.fill();
+    ctx.fillStyle = "#666b70";
+    roundedRect(-3, 11, 6, 39, 3);
+    ctx.fill();
+
+    // Bike body and rear fender.
+    ctx.fillStyle = "#f4c51f";
+    ctx.beginPath();
+    ctx.moveTo(-20, -17);
+    ctx.lineTo(-14, 14);
+    ctx.lineTo(-9, 25);
+    ctx.lineTo(9, 25);
+    ctx.lineTo(14, 14);
+    ctx.lineTo(20, -17);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#17191c";
+    roundedRect(-17, -25, 34, 20, 7);
+    ctx.fill();
+    roundedRect(-13, -39, 26, 19, 8);
+    ctx.fill();
+
+    // Rider's shoulders and helmet, seen from behind.
+    ctx.fillStyle = "#17191c";
+    ctx.beginPath();
+    ctx.moveTo(-25, -39);
+    ctx.quadraticCurveTo(-24, -61, 0, -62);
+    ctx.quadraticCurveTo(24, -61, 25, -39);
+    ctx.lineTo(17, -27);
+    ctx.lineTo(-17, -27);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#f0bf1f";
+    ctx.beginPath();
+    ctx.ellipse(0, -65, 12, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#282b2e";
+    ctx.fillRect(-10, -67, 20, 5);
+
+    // Rear lamp and handlebars.
+    ctx.fillStyle = "#ff453a";
+    roundedRect(-5, 6, 10, 7, 3);
+    ctx.fill();
+    ctx.strokeStyle = "#d8dadd";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-24, -28);
+    ctx.lineTo(-31, -34);
+    ctx.moveTo(24, -28);
+    ctx.lineTo(31, -34);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawHud() {
+    const pad = Math.max(18, w * 0.055);
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 20px system-ui, sans-serif";
+    ctx.fillText("SCORE  " + Math.floor(game.score), pad, 18);
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#f4c51f";
+    ctx.fillText("SPEED  " + game.speed.toFixed(1) + "x", w - pad, 18);
+
+    // Small accent line.
+    ctx.fillStyle = "rgba(255,255,255,0.28)";
+    ctx.fillRect(pad, 48, w - pad * 2, 2);
+  }
+
+  function drawOverlay(title, subtitle, hint) {
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#f4c51f";
+    ctx.font = "900 " + Math.max(32, Math.min(54, w * 0.13)) + "px system-ui, sans-serif";
+    ctx.fillText(title, w / 2, h * 0.39);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "600 18px system-ui, sans-serif";
+    ctx.fillText(subtitle, w / 2, h * 0.46);
+
+    ctx.fillStyle = "rgba(255,255,255,0.76)";
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText(hint, w / 2, h * 0.52);
+  }
+
+  function startGame() {
+    game.mode = "playing";
+    game.lane = 1;
+    game.cars = [];
+    game.score = 0;
+    game.speed = 1;
+    game.spawnTimer = 0.65;
+    game.flash = 0;
+  }
+
+  function endGame() {
+    game.mode = "over";
+    game.flash = 0.24;
+  }
+
+  function moveLane(direction) {
+    if (game.mode !== "playing") {
+      startGame();
+      return;
+    }
+    game.lane = Math.max(0, Math.min(2, game.lane + direction));
+  }
+
+  function spawnCar() {
+    const lane = Math.floor(Math.random() * 3);
+    const type = Math.random() < 0.58 ? "sedan" : "suv";
+    game.cars.push({ lane, type, z: 0.02, scored: false });
+  }
+
+  function update(dt) {
+    if (game.mode !== "playing") {
+      if (game.flash > 0) game.flash = Math.max(0, game.flash - dt);
+      return;
+    }
+
+    game.speed = Math.min(2.8, 1 + game.score / 180);
+    game.score += dt * 10 * game.speed;
+    game.spawnTimer -= dt;
+
+    if (game.spawnTimer <= 0) {
+      spawnCar();
+      game.spawnTimer = Math.max(0.55, 1.12 - game.speed * 0.17) + Math.random() * 0.42;
+    }
+
+    const movement = dt * (0.
